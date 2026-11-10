@@ -1,0 +1,1176 @@
+--[[
+    ⚡ FeeFaaHub — Combined Script
+    Merges: Auto Coin Press · Fruit Farm · Plant Grid · Hunger · Performance
+    PC & Mobile compatible | Brand: FeeFaaHub
+--]]
+
+-- ══════════════════════════════════════════════
+--  SERVICES
+-- ══════════════════════════════════════════════
+local Players         = game:GetService("Players")
+local RunService      = game:GetService("RunService")
+local UserInputService= game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser     = game:GetService("VirtualUser")
+
+local localPlayer = Players.LocalPlayer
+local PlayerGui   = localPlayer:WaitForChild("PlayerGui")
+local isMobile    = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+
+-- ══════════════════════════════════════════════
+--  MODULE REQUIRES (guarded)
+-- ══════════════════════════════════════════════
+local Packets, GameUtil, Clock
+pcall(function()
+    Packets = require(ReplicatedStorage:WaitForChild("Modules")
+        :WaitForChild("util"):WaitForChild("packets"))
+end)
+if not Packets then
+    pcall(function()
+        Packets = require(ReplicatedStorage:WaitForChild("Modules")
+            :WaitForChild("Packets"))
+    end)
+end
+pcall(function()
+    GameUtil = require(ReplicatedStorage:WaitForChild("Modules")
+        :WaitForChild("util"):WaitForChild("gameUtil"))
+end)
+pcall(function()
+    Clock = require(ReplicatedStorage:WaitForChild("Modules")
+        :WaitForChild("util"):WaitForChild("clock"))
+end)
+
+-- ══════════════════════════════════════════════
+--  CONSTANTS
+-- ══════════════════════════════════════════════
+local GRID_SIZE = (type(getgenv) == "function" and pcall(function()
+    return getgenv().AUTO_PLANT_GRID_SIZE
+end) and getgenv().AUTO_PLANT_GRID_SIZE) or 5.01
+
+local FRUIT_IDS = {
+    Bloodfruit=94,  Bluefruit=377,  Lemon=99,       Coconut=1,
+    Jelly=604,      Banana=606,     Orange=602,     Oddberry=32,
+    Berry=35,       Strangefruit=302, Strawberry=282, Sunfruit=128,
+    Pumpkin=80,     ["Prickly Pear"]=378, Apple=243, Barley=247,
+    Cloudberry=101, Carrot=147,     Watermelon=850, Mango=852,
+    Blossom=958,
+}
+local FRUIT_NAMES = {
+    "Bloodfruit","Bluefruit","Lemon","Coconut","Jelly","Banana","Orange",
+    "Oddberry","Berry","Strangefruit","Strawberry","Sunfruit","Pumpkin",
+    "Prickly Pear","Apple","Barley","Cloudberry","Carrot","Watermelon",
+    "Mango","Blossom",
+}
+
+-- ══════════════════════════════════════════════
+--  STATE
+-- ══════════════════════════════════════════════
+local S = {
+    -- Farm tab
+    FarmEnabled   = false,
+    SelectedFruit = "Bloodfruit",
+    PlantRange    = 20,
+    HarvestRange  = 30,
+    TweenEnabled  = false,
+    TweenTarget   = "Both",   -- "Box" / "Bush" / "Both"
+    TweenRange    = 300,
+    StopLimit     = 0,
+    -- Place tab
+    PlaceEnabled  = false,
+    GridShape     = "Circle", -- "Circle" / "Square"
+    PlaceRadius   = 35,
+    VisualRadius  = 50,
+    PlaceCooldown = 0.25,
+    RaycastHeight = 200,
+    GridViz       = true,
+    -- Coin tab
+    CoinEnabled   = false,
+    -- Misc tab
+    AutoHunger    = true,
+    HungerFruit   = "Bluefruit",
+}
+
+-- ══════════════════════════════════════════════
+--  CHARACTER HELPERS
+-- ══════════════════════════════════════════════
+local function getChar()
+    return localPlayer.Character
+end
+local function getHRP()
+    local c = getChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+-- ══════════════════════════════════════════════
+--  PERFORMANCE OPTIMIZATION
+-- ══════════════════════════════════════════════
+local function applyPerf()
+    local lt = game:GetService("Lighting")
+    pcall(function()
+        (settings()).Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+    lt.GlobalShadows        = false
+    lt.Brightness           = 1
+    lt.EnvironmentDiffuseScale  = 0
+    lt.EnvironmentSpecularScale = 0
+    lt.FogEnd               = 9e9
+    for _, v in ipairs(lt:GetChildren()) do
+        if v:IsA("PostEffect") then v.Enabled = false end
+    end
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") then
+            v.Material    = Enum.Material.Plastic
+            v.Reflectance = 0
+        elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Beam") then
+            v.Enabled = false
+        elseif v:IsA("Model") and v.Name == "Cave Spikes" then
+            v:Destroy()
+        end
+    end
+end
+task.spawn(applyPerf)
+
+local function configHumanoid(char)
+    local h = char:WaitForChild("Humanoid", 10)
+    if not h then return end
+    h:SetStateEnabled(Enum.HumanoidStateType.Climbing,    false)
+    h:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
+    h:SetStateEnabled(Enum.HumanoidStateType.Swimming,    false)
+end
+local c0 = getChar()
+if c0 then task.spawn(configHumanoid, c0) end
+localPlayer.CharacterAdded:Connect(function(c) task.spawn(configHumanoid, c) end)
+
+-- Anti-AFK
+localPlayer.Idled:Connect(function()
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+
+-- ══════════════════════════════════════════════
+--  BODY-VELOCITY TWEEN SYSTEM
+-- ══════════════════════════════════════════════
+local bv = Instance.new("BodyVelocity")
+bv.MaxForce = Vector3.new(0,0,0)
+bv.P        = 9000
+bv.Velocity = Vector3.zero
+
+local tweenTarget = nil
+local lastKey     = 0
+
+local function bvAttach(char)
+    local hrp = char:WaitForChild("HumanoidRootPart")
+    bv.Parent   = hrp
+    bv.Velocity = Vector3.zero
+    bv.MaxForce = Vector3.new(0,0,0)
+end
+localPlayer.CharacterAdded:Connect(bvAttach)
+do
+    local initC = getChar()
+    if initC then
+        local h0 = initC:FindFirstChild("HumanoidRootPart")
+        if h0 then bv.Parent = h0 end
+    end
+end
+
+UserInputService.InputBegan:Connect(function(inp, gp)
+    if gp then return end
+    local k = inp.KeyCode
+    if k==Enum.KeyCode.W or k==Enum.KeyCode.A or k==Enum.KeyCode.S
+       or k==Enum.KeyCode.D or k==Enum.KeyCode.Space then
+        lastKey     = tick()
+        tweenTarget = nil
+    end
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not S.TweenEnabled or tick()-lastKey < 0.3 or not tweenTarget then
+        bv.MaxForce = Vector3.new(0,0,0)
+        bv.Velocity = Vector3.zero
+        return
+    end
+    local hrp = getHRP()
+    if not hrp or not hrp.Parent then
+        bv.MaxForce = Vector3.new(0,0,0)
+        return
+    end
+    if bv.Parent ~= hrp then bv.Parent = hrp end
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    local pos = hrp.Position
+    local rp  = RaycastParams.new()
+    rp.FilterDescendantsInstances = { getChar() }
+    rp.FilterType  = Enum.RaycastFilterType.Exclude
+    rp.IgnoreWater = true
+    local ty  = tweenTarget.Y + 6
+    local ray = workspace:Raycast(pos + Vector3.new(0,10,0), Vector3.new(0,-50,0), rp)
+    if ray then ty = math.max(ty, ray.Position.Y + 6) end
+    local dest = Vector3.new(tweenTarget.X, ty, tweenTarget.Z)
+    local diff = dest - pos
+    if diff.Magnitude < 2 then
+        bv.Velocity = Vector3.zero
+        return
+    end
+    local vel = diff.Unit * 19
+    local dy  = dest.Y - pos.Y
+    if dy > 0 then
+        vel = vel + Vector3.new(0, math.clamp(dy * 1.3, 0, 13), 0)
+    end
+    bv.Velocity = vel
+end)
+
+-- ══════════════════════════════════════════════
+--  PLANT BOX CACHE
+-- ══════════════════════════════════════════════
+local plantBoxes = {}
+
+local function refreshBoxes()
+    table.clear(plantBoxes)
+    local dep = workspace:FindFirstChild("Deployables")
+    if not dep then return end
+    for _, v in ipairs(dep:GetDescendants()) do
+        if v:IsA("Model") and v.Name == "Plant Box" then
+            local eid = v:GetAttribute("EntityID")
+            local bp  = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)
+            if eid and bp then
+                table.insert(plantBoxes, {entityID=eid, model=v, part=bp})
+            end
+        end
+    end
+end
+refreshBoxes()
+task.spawn(function()
+    while true do task.wait(20); refreshBoxes() end
+end)
+
+-- ══════════════════════════════════════════════
+--  HUNGER HELPERS
+-- ══════════════════════════════════════════════
+local function getHunger()
+    local mg = PlayerGui:FindFirstChild("MainGui")
+    if not mg then return 100 end
+    local vl = mg:FindFirstChild("Panels")
+        and mg.Panels:FindFirstChild("Stats")
+        and mg.Panels.Stats:FindFirstChild("Bars")
+        and mg.Panels.Stats.Bars:FindFirstChild("Hunger")
+        and mg.Panels.Stats.Bars.Hunger:FindFirstChild("ValueLabel")
+    return (vl and vl:IsA("TextLabel") and tonumber(vl.Text)) or 100
+end
+
+local function getItemLO(fruitName)
+    local mg = PlayerGui:FindFirstChild("MainGui")
+    if not mg then return nil end
+    local list = mg:FindFirstChild("RightPanel")
+        and mg.RightPanel:FindFirstChild("Inventory")
+        and mg.RightPanel.Inventory:FindFirstChild("List")
+    if not list then return nil end
+    local item = list:FindFirstChild(fruitName)
+    return item and item.LayoutOrder or nil
+end
+
+task.spawn(function()
+    while true do
+        task.wait(5)
+        if S.AutoHunger and getHunger() <= 10 and Packets then
+            local lo = getItemLO(S.HungerFruit)
+            if lo and Packets.UseBagItem then
+                pcall(function() Packets.UseBagItem.send(lo) end)
+                task.wait(0.2)
+            end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  AUTO COIN PRESS
+-- ══════════════════════════════════════════════
+local function getCoinEID()
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local dep = workspace:FindFirstChild("Deployables")
+    if not dep then return nil end
+    for _, v in ipairs(dep:GetChildren()) do
+        if v.Name == "Coin Press" then
+            local bp = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart")
+            if bp and (bp.Position - hrp.Position).Magnitude <= 50 then
+                return v:GetAttribute("EntityID")
+            end
+        end
+    end
+    return nil
+end
+
+RunService.Heartbeat:Connect(function()
+    if not S.CoinEnabled or not Packets or not GameUtil or not Clock then return end
+    local now = Clock.getServerTime(true)
+    if now - (GameUtil.Data.lastToolUse or 0) < 0.016666 then return end
+    local eid = getCoinEID()
+    if eid then
+        GameUtil.Data.lastToolUse = now
+        pcall(function()
+            Packets.InteractStructure.send({entityID=eid, itemID=597})
+        end)
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  AUTO FARM — TWEEN TARGETING
+-- ══════════════════════════════════════════════
+task.spawn(function()
+    local stuckCount = 0
+    local lastTPos   = nil
+    while true do
+        task.wait(0.05)
+        if not S.FarmEnabled or not S.TweenEnabled then
+            tweenTarget = nil
+            task.wait(0.1)
+            continue
+        end
+        local hrp = getHRP()
+        if not hrp then task.wait(0.1); continue end
+        local pos  = hrp.Position
+        local best = nil
+        -- Scan plant boxes (without seed)
+        for i = #plantBoxes, 1, -1 do
+            local pb = plantBoxes[i]
+            if not pb.model or not pb.model.Parent then
+                table.remove(plantBoxes, i); continue
+            end
+            if S.TweenTarget == "Box" or S.TweenTarget == "Both" then
+                local mag = (pb.part.Position - pos).Magnitude
+                if mag <= S.TweenRange and not pb.model:FindFirstChild("Seed") then
+                    if not best or mag < best.d then
+                        best = {d=mag, p=pb.part.Position}
+                    end
+                end
+            end
+        end
+        -- Scan crops
+        if S.TweenTarget == "Bush" or S.TweenTarget == "Both" then
+            local crops = workspace:FindFirstChild("Crops")
+            if crops then
+                for _, v in ipairs(crops:GetDescendants()) do
+                    if v:IsA("Model") and v:GetAttribute("EntityID") then
+                        local bp = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)
+                        if bp then
+                            local mag = (bp.Position - pos).Magnitude
+                            if mag <= S.TweenRange and (not best or mag < best.d) then
+                                best = {d=mag, p=bp.Position}
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        if best then
+            if lastTPos and (lastTPos - best.p).Magnitude < 1 then
+                stuckCount = stuckCount + 1
+                if stuckCount >= 60 then
+                    tweenTarget = nil; stuckCount = 0
+                    task.wait(0.2); continue
+                end
+            else
+                lastTPos   = best.p
+                stuckCount = 0
+            end
+            tweenTarget = (best.p - pos).Magnitude > 2 and best.p or nil
+        else
+            tweenTarget = nil
+            lastTPos    = nil
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  AUTO FARM — PLANT IN BOXES
+-- ══════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(0.01)
+        if not S.FarmEnabled or not Packets then task.wait(0.2); continue end
+        local hrp = getHRP()
+        if not hrp then task.wait(0.2); continue end
+        local pos     = hrp.Position
+        local itemID  = FRUIT_IDS[S.SelectedFruit] or 94
+        local planted = 0
+        for i = #plantBoxes, 1, -1 do
+            local pb = plantBoxes[i]
+            if not pb.model or not pb.model.Parent then
+                table.remove(plantBoxes, i); continue
+            end
+            if (pb.part.Position - pos).Magnitude <= S.PlantRange
+               and not pb.model:FindFirstChild("Seed") then
+                pcall(function()
+                    Packets.InteractStructure.send({entityID=pb.entityID, itemID=itemID})
+                end)
+                planted = planted + 1
+                if planted % 20 == 0 then RunService.Heartbeat:Wait() end
+            end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  AUTO FARM — HARVEST CROPS
+-- ══════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        if not S.FarmEnabled or not Packets then continue end
+        local hrp = getHRP()
+        if not hrp then continue end
+        local pos  = hrp.Position
+        local rsq  = S.HarvestRange ^ 2
+        local crops = workspace:FindFirstChild("Crops")
+        if not crops then continue end
+        for _, v in ipairs(crops:GetDescendants()) do
+            if v:IsA("Model") then
+                local bp = v.PrimaryPart or v:FindFirstChildWhichIsA("BasePart", true)
+                if bp then
+                    local d = bp.Position - pos
+                    if d:Dot(d) <= rsq then
+                        local eid = v:GetAttribute("EntityID")
+                        if eid then
+                            pcall(function() Packets.Pickup.send(eid) end)
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  PLANT BOX GRID — DATA
+-- ══════════════════════════════════════════════
+local gridVizFolder = Instance.new("Folder")
+gridVizFolder.Name   = "FeeGridViz"
+gridVizFolder.Parent = workspace.CurrentCamera
+
+local vizPool       = {}
+local gridSet       = {}   -- [n][k] = true  (box exists at cell)
+local gridCooldown  = {}   -- [n][k] = timestamp (recently placed)
+local gridOX        = 0
+local gridOZ        = 0
+local gridReady     = false
+local lastGridRefresh  = 0
+local lastVizUpdate    = 0
+local lastGridPlace    = 0
+
+local rpGrid = RaycastParams.new()
+rpGrid.FilterType  = Enum.RaycastFilterType.Exclude
+rpGrid.IgnoreWater = false
+
+local function rpUpdateFilter()
+    local t  = {gridVizFolder}
+    local pw = workspace:FindFirstChild("Players")
+    if pw then table.insert(t, pw) end
+    rpGrid.FilterDescendantsInstances = t
+end
+rpUpdateFilter()
+
+local function setG(t, n, k, v)
+    if not t[n] then t[n] = {} end
+    t[n][k] = v
+end
+local function getG(t, n, k)
+    return t[n] and t[n][k]
+end
+
+local function initGrid()
+    local hrp = getHRP()
+    if not hrp then return false end
+    gridOX    = math.round(hrp.Position.X / GRID_SIZE) * GRID_SIZE
+    gridOZ    = math.round(hrp.Position.Z / GRID_SIZE) * GRID_SIZE
+    gridReady = true
+    return true
+end
+
+local gridDeployConn
+local function refreshGridSet()
+    for k in pairs(gridSet) do gridSet[k] = nil end
+    local dep = workspace:FindFirstChild("Deployables")
+    if not dep then return end
+    if gridDeployConn then gridDeployConn:Disconnect() end
+    local function handleBox(v)
+        if v.Name ~= "Plant Box" then return end
+        local p  = v:GetPivot().Position
+        local n  = math.round((p.X - gridOX) / GRID_SIZE)
+        local k2 = math.round((p.Z - gridOZ) / GRID_SIZE)
+        setG(gridSet, n, k2, true)
+        setG(gridCooldown, n, k2, nil)
+    end
+    gridDeployConn = dep.ChildAdded:Connect(handleBox)
+    for _, v in ipairs(dep:GetChildren()) do handleBox(v) end
+end
+
+local function getVizRay(x, z, y)
+    return workspace:Raycast(
+        Vector3.new(x, y + S.RaycastHeight, z),
+        Vector3.new(0, -500, 0),
+        rpGrid
+    )
+end
+
+local function ensureVizPool(n)
+    while #vizPool < n do
+        local p = Instance.new("Part")
+        p.Size       = Vector3.new(GRID_SIZE - 0.3, 0.1, GRID_SIZE - 0.3)
+        p.Anchored   = true
+        p.CanCollide = false
+        p.CanQuery   = false
+        p.CanTouch   = false
+        p.Material   = Enum.Material.Neon
+        p.Parent     = nil
+        table.insert(vizPool, p)
+    end
+end
+
+-- ══════════════════════════════════════════════
+--  GRID VISUALIZER (Heartbeat)
+-- ══════════════════════════════════════════════
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if not gridReady then
+        if not initGrid() then return end
+        refreshGridSet()
+    end
+    if now - lastGridRefresh > 15 then
+        lastGridRefresh = now
+        rpUpdateFilter()
+        refreshGridSet()
+    end
+    if now - lastVizUpdate < 0.15 then return end
+    lastVizUpdate = now
+
+    local hrp = getHRP()
+    if not hrp then return end
+    local pos = hrp.Position
+    local vr  = S.VisualRadius
+    local pr  = S.PlaceRadius
+    local mx  = 50000 / GRID_SIZE
+
+    local xMin = math.max(-mx, math.floor((pos.X - gridOX - vr) / GRID_SIZE))
+    local xMax = math.min( mx, math.ceil( (pos.X - gridOX + vr) / GRID_SIZE))
+    local zMin = math.max(-mx, math.floor((pos.Z - gridOZ - vr) / GRID_SIZE))
+    local zMax = math.min( mx, math.ceil( (pos.Z - gridOZ + vr) / GRID_SIZE))
+
+    ensureVizPool((xMax - xMin + 1) * (zMax - zMin + 1))
+
+    local vi = 1
+    for n = xMin, xMax do
+        for k = zMin, zMax do
+            if vi > #vizPool then break end
+            local wx   = gridOX + n * GRID_SIZE
+            local wz   = gridOZ + k * GRID_SIZE
+            local part = vizPool[vi]; vi = vi + 1
+            local inP, inB
+
+            if S.GridShape == "Circle" then
+                local d2 = (wx - pos.X)^2 + (wz - pos.Z)^2
+                inP = d2 <= pr * pr
+                inB = not inP and d2 <= (pr + GRID_SIZE)^2
+            else
+                local dx = math.abs(wx - pos.X)
+                local dz = math.abs(wz - pos.Z)
+                inP = dx <= pr and dz <= pr
+                inB = not inP and dx <= pr + GRID_SIZE and dz <= pr + GRID_SIZE
+            end
+
+            if S.GridViz and (inP or inB) and not getG(gridSet, n, k) then
+                local ray = getVizRay(wx, wz, pos.Y)
+                if ray then
+                    local inst      = ray.Instance
+                    local isTerrain = inst:IsA("Terrain")
+                    local ancestorModel = inst:FindFirstAncestorWhichIsA("Model")
+                    local isDock    = string.lower(inst.Name) == "dock"
+                        or (ancestorModel and string.lower(ancestorModel.Name) == "dock")
+                    if (isTerrain or isDock) and ray.Material ~= Enum.Material.Water then
+                        part.Position    = Vector3.new(wx, ray.Position.Y + 0.5, wz)
+                        part.Color       = inP and Color3.fromRGB(0,255,100) or Color3.fromRGB(255,255,100)
+                        part.Transparency = inP and 0.3 or 0.45
+                        part.Parent      = gridVizFolder
+                        continue
+                    end
+                end
+            end
+            part.Parent = nil
+        end
+    end
+    for i = vi, #vizPool do vizPool[i].Parent = nil end
+end)
+
+-- ══════════════════════════════════════════════
+--  GRID PLACEMENT LOOP
+-- ══════════════════════════════════════════════
+task.spawn(function()
+    while true do
+        task.wait(math.max(0.05, S.PlaceCooldown))
+        if not S.PlaceEnabled or not Packets or not gridReady then continue end
+        local hrp = getHRP(); if not hrp then continue end
+        local pos = hrp.Position
+        local now = os.clock()
+        if now - lastGridPlace < S.PlaceCooldown then continue end
+        local pr  = S.PlaceRadius
+        local mx  = 50000 / GRID_SIZE
+        local xMin = math.max(-mx, math.floor((pos.X - gridOX - pr) / GRID_SIZE))
+        local xMax = math.min( mx, math.ceil( (pos.X - gridOX + pr) / GRID_SIZE))
+        local zMin = math.max(-mx, math.floor((pos.Z - gridOZ - pr) / GRID_SIZE))
+        local zMax = math.min( mx, math.ceil( (pos.Z - gridOZ + pr) / GRID_SIZE))
+        for n = xMin, xMax do
+            for k = zMin, zMax do
+                if getG(gridSet, n, k) then continue end
+                local cd = getG(gridCooldown, n, k)
+                if cd and now - cd < 1 then continue end
+                local wx = gridOX + n * GRID_SIZE
+                local wz = gridOZ + k * GRID_SIZE
+                -- Shape boundary
+                if S.GridShape == "Circle" then
+                    if (wx-pos.X)^2 + (wz-pos.Z)^2 > pr*pr then continue end
+                else
+                    if math.abs(wx-pos.X) > pr or math.abs(wz-pos.Z) > pr then continue end
+                end
+                local ray = getVizRay(wx, wz, pos.Y)
+                if ray then
+                    local inst      = ray.Instance
+                    local isTerrain = inst:IsA("Terrain")
+                    local am        = inst:FindFirstAncestorWhichIsA("Model")
+                    local isDock    = string.lower(inst.Name) == "dock"
+                        or (am and string.lower(am.Name) == "dock")
+                    if (isTerrain or isDock) and ray.Material ~= Enum.Material.Water then
+                        pcall(function()
+                            Packets.PlaceStructure.send({
+                                buildingName = "Plant Box",
+                                cframe       = CFrame.new(ray.Position),
+                            })
+                        end)
+                        setG(gridCooldown, n, k, now)
+                        lastGridPlace = now
+                        return
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ══════════════════════════════════════════════
+--  GUI — SHARED CONSTANTS
+-- ══════════════════════════════════════════════
+local PW  = isMobile and 240 or 210   -- panel width
+local BH  = isMobile and 36  or 27   -- button/row height
+local FS  = isMobile and 13  or 11   -- font size
+local PAD = 5
+
+-- Destroy old instance
+if PlayerGui:FindFirstChild("FeeFaaHubGui") then
+    PlayerGui:FindFirstChild("FeeFaaHubGui"):Destroy()
+end
+
+-- ScreenGui
+local sg = Instance.new("ScreenGui")
+sg.Name              = "FeeFaaHubGui"
+sg.ResetOnSpawn      = false
+sg.ZIndexBehavior    = Enum.ZIndexBehavior.Global
+local ok_ = pcall(function() sg.Parent = game:GetService("CoreGui") end)
+if not ok_ or sg.Parent ~= game:GetService("CoreGui") then
+    sg.Parent = PlayerGui
+end
+
+-- ══════════════════════════════════════════════
+--  MAIN FRAME
+-- ══════════════════════════════════════════════
+local mf = Instance.new("Frame")
+mf.Name            = "FeeFaaMain"
+mf.Size            = UDim2.new(0, PW, 0, 320)
+mf.Position        = UDim2.new(0, 10, 0.5, -160)
+mf.BackgroundColor3 = Color3.fromRGB(13, 11, 20)
+mf.BorderSizePixel = 0
+mf.Active          = true
+mf.Draggable       = not isMobile
+mf.ClipsDescendants = true
+mf.Parent          = sg
+do
+    local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,8); c.Parent = mf
+    local s = Instance.new("UIStroke"); s.Color = Color3.fromRGB(90,55,160); s.Thickness = 1.5; s.Parent = mf
+end
+
+-- Title bar
+local titleBar = Instance.new("Frame")
+titleBar.Name            = "TitleBar"
+titleBar.Size            = UDim2.new(1, 0, 0, 26)
+titleBar.BackgroundColor3 = Color3.fromRGB(20, 14, 34)
+titleBar.BorderSizePixel = 0
+titleBar.Parent          = mf
+
+local titleLbl = Instance.new("TextLabel")
+titleLbl.Size               = UDim2.new(1, -32, 1, 0)
+titleLbl.Position           = UDim2.new(0, 8, 0, 0)
+titleLbl.BackgroundTransparency = 1
+titleLbl.Text               = "⚡ FeeFaaHub"
+titleLbl.TextColor3         = Color3.fromRGB(185, 135, 255)
+titleLbl.Font               = Enum.Font.GothamBold
+titleLbl.TextSize           = 12
+titleLbl.TextXAlignment     = Enum.TextXAlignment.Left
+titleLbl.Parent             = titleBar
+
+local minBtn = Instance.new("TextButton")
+minBtn.Size            = UDim2.new(0, 24, 0, 18)
+minBtn.Position        = UDim2.new(1, -27, 0, 4)
+minBtn.BackgroundColor3 = Color3.fromRGB(65, 42, 110)
+minBtn.TextColor3      = Color3.fromRGB(220, 205, 255)
+minBtn.Font            = Enum.Font.GothamBold
+minBtn.TextSize        = 12
+minBtn.Text            = "−"
+minBtn.Parent          = titleBar
+do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = minBtn end
+
+-- Tab bar
+local tabBar = Instance.new("Frame")
+tabBar.Name            = "TabBar"
+tabBar.Size            = UDim2.new(1, 0, 0, 22)
+tabBar.Position        = UDim2.new(0, 0, 0, 26)
+tabBar.BackgroundColor3 = Color3.fromRGB(17, 12, 28)
+tabBar.BorderSizePixel = 0
+tabBar.Parent          = mf
+do
+    local ull = Instance.new("UIListLayout")
+    ull.FillDirection = Enum.FillDirection.Horizontal
+    ull.Padding       = UDim.new(0, 1)
+    ull.Parent        = tabBar
+end
+
+-- Content holder
+local contentHolder = Instance.new("Frame")
+contentHolder.Name              = "ContentHolder"
+contentHolder.Size              = UDim2.new(1, 0, 1, -48)
+contentHolder.Position          = UDim2.new(0, 0, 0, 48)
+contentHolder.BackgroundTransparency = 1
+contentHolder.ClipsDescendants  = true
+contentHolder.Parent            = mf
+
+-- ══════════════════════════════════════════════
+--  PAGE FACTORY
+-- ══════════════════════════════════════════════
+local function makePage()
+    local sf = Instance.new("ScrollingFrame")
+    sf.Size                  = UDim2.new(1, 0, 1, 0)
+    sf.BackgroundTransparency = 1
+    sf.BorderSizePixel       = 0
+    sf.ScrollBarThickness    = 3
+    sf.ScrollBarImageColor3  = Color3.fromRGB(100, 65, 185)
+    sf.AutomaticCanvasSize   = Enum.AutomaticSize.Y
+    sf.CanvasSize            = UDim2.new(0, 0, 0, 0)
+    sf.Visible               = false
+    sf.Parent                = contentHolder
+    local ul = Instance.new("UIListLayout")
+    ul.Padding     = UDim.new(0, 3)
+    ul.SortOrder   = Enum.SortOrder.LayoutOrder
+    ul.Parent      = sf
+    local up = Instance.new("UIPadding")
+    up.PaddingLeft   = UDim.new(0, PAD)
+    up.PaddingRight  = UDim.new(0, PAD)
+    up.PaddingTop    = UDim.new(0, PAD)
+    up.PaddingBottom = UDim.new(0, PAD)
+    up.Parent        = sf
+    return sf
+end
+
+-- ══════════════════════════════════════════════
+--  ELEMENT BUILDERS
+-- ══════════════════════════════════════════════
+local function mkSep(page, txt)
+    if txt then
+        local l = Instance.new("TextLabel")
+        l.Size               = UDim2.new(1, 0, 0, BH - 10)
+        l.BackgroundTransparency = 1
+        l.Text               = "── " .. txt .. " ──"
+        l.TextColor3         = Color3.fromRGB(100, 75, 155)
+        l.Font               = Enum.Font.GothamBold
+        l.TextSize           = FS - 1
+        l.Parent             = page
+    else
+        local f = Instance.new("Frame")
+        f.Size               = UDim2.new(1, 0, 0, 1)
+        f.BackgroundColor3   = Color3.fromRGB(55, 40, 85)
+        f.BorderSizePixel    = 0
+        f.Parent             = page
+    end
+end
+
+local function mkToggle(page, text, stateKey, onChange)
+    local row = Instance.new("Frame")
+    row.Size                = UDim2.new(1, 0, 0, BH)
+    row.BackgroundTransparency = 1
+    row.Parent              = page
+    local hl = Instance.new("UIListLayout")
+    hl.FillDirection        = Enum.FillDirection.Horizontal
+    hl.VerticalAlignment    = Enum.VerticalAlignment.Center
+    hl.Parent               = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                = UDim2.new(1, -60, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                = text
+    lbl.TextColor3          = Color3.fromRGB(200, 192, 220)
+    lbl.Font                = Enum.Font.Gotham
+    lbl.TextSize            = FS
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Parent              = row
+
+    local initOn = stateKey and S[stateKey] or false
+    local b = Instance.new("TextButton")
+    b.Size                  = UDim2.new(0, 56, 0, BH - 5)
+    b.BackgroundColor3      = initOn and Color3.fromRGB(0,160,80) or Color3.fromRGB(50,38,72)
+    b.TextColor3            = Color3.fromRGB(240, 232, 255)
+    b.Font                  = Enum.Font.GothamBold
+    b.TextSize              = FS - 1
+    b.Text                  = initOn and "ON" or "OFF"
+    b.AutoButtonColor       = true
+    b.Parent                = row
+    do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,5); c.Parent = b end
+
+    b.MouseButton1Click:Connect(function()
+        if stateKey then
+            S[stateKey]      = not S[stateKey]
+            b.Text           = S[stateKey] and "ON" or "OFF"
+            b.BackgroundColor3 = S[stateKey]
+                and Color3.fromRGB(0,160,80) or Color3.fromRGB(50,38,72)
+        end
+        if onChange then onChange(stateKey and S[stateKey]) end
+    end)
+    return b
+end
+
+-- Cycling dropdown (tap to cycle options)
+local function mkDropdown(page, options, stateKey)
+    local init = S[stateKey] or options[1]
+    local b    = Instance.new("TextButton")
+    b.Size               = UDim2.new(1, 0, 0, BH)
+    b.BackgroundColor3   = Color3.fromRGB(35, 27, 55)
+    b.TextColor3         = Color3.fromRGB(210, 198, 240)
+    b.Font               = Enum.Font.Gotham
+    b.TextSize           = FS
+    b.Text               = "▾  " .. tostring(init)
+    b.TextXAlignment     = Enum.TextXAlignment.Left
+    b.AutoButtonColor    = true
+    b.Parent             = page
+    do
+        local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,5); c.Parent = b
+        local up = Instance.new("UIPadding"); up.PaddingLeft = UDim.new(0,6); up.Parent = b
+    end
+    local idx = 1
+    for i, o in ipairs(options) do
+        if o == init then idx = i; break end
+    end
+    b.MouseButton1Click:Connect(function()
+        idx        = idx % #options + 1
+        S[stateKey] = options[idx]
+        b.Text     = "▾  " .. options[idx]
+    end)
+    return b
+end
+
+-- Numeric input row
+local function mkInput(page, labelText, stateKey, minV, maxV)
+    local row = Instance.new("Frame")
+    row.Size                = UDim2.new(1, 0, 0, BH)
+    row.BackgroundTransparency = 1
+    row.Parent              = page
+    local hl = Instance.new("UIListLayout")
+    hl.FillDirection        = Enum.FillDirection.Horizontal
+    hl.VerticalAlignment    = Enum.VerticalAlignment.Center
+    hl.Parent               = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                = UDim2.new(0.6, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                = labelText
+    lbl.TextColor3          = Color3.fromRGB(175, 168, 200)
+    lbl.Font                = Enum.Font.Gotham
+    lbl.TextSize            = FS - 1
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Parent              = row
+
+    local tb = Instance.new("TextBox")
+    tb.Size                 = UDim2.new(0.38, 0, 0, BH - 7)
+    tb.BackgroundColor3     = Color3.fromRGB(38, 28, 60)
+    tb.TextColor3           = Color3.fromRGB(220, 212, 245)
+    tb.Font                 = Enum.Font.Gotham
+    tb.TextSize             = FS
+    tb.Text                 = tostring(S[stateKey])
+    tb.BorderSizePixel      = 0
+    tb.Parent               = row
+    do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = tb end
+
+    tb.FocusLost:Connect(function()
+        local v = tonumber(tb.Text)
+        if v then
+            if minV then v = math.max(v, minV) end
+            if maxV then v = math.min(v, maxV) end
+            S[stateKey] = v
+            tb.Text     = tostring(v)
+        else
+            tb.Text = tostring(S[stateKey])
+        end
+    end)
+    return row
+end
+
+-- Plain button
+local function mkBtn(page, text, onClick)
+    local b = Instance.new("TextButton")
+    b.Size               = UDim2.new(1, 0, 0, BH)
+    b.BackgroundColor3   = Color3.fromRGB(52, 38, 82)
+    b.TextColor3         = Color3.fromRGB(220, 208, 255)
+    b.Font               = Enum.Font.GothamBold
+    b.TextSize           = FS
+    b.Text               = text
+    b.AutoButtonColor    = true
+    b.Parent             = page
+    do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,5); c.Parent = b end
+    b.MouseButton1Click:Connect(onClick)
+    return b
+end
+
+-- ══════════════════════════════════════════════
+--  TAB SYSTEM
+-- ══════════════════════════════════════════════
+local TABS     = {"🌾 Farm", "📦 Place", "🪙 Coin", "⚙️ Misc"}
+local pages    = {}
+local tabBtns  = {}
+
+for i, name in ipairs(TABS) do
+    pages[i] = makePage()
+    local tb = Instance.new("TextButton")
+    tb.Size            = UDim2.new(1 / #TABS, -1, 1, -2)
+    tb.BackgroundColor3 = Color3.fromRGB(26, 18, 42)
+    tb.TextColor3      = Color3.fromRGB(130, 118, 165)
+    tb.Font            = Enum.Font.GothamBold
+    tb.TextSize        = 9
+    tb.Text            = name
+    tb.LayoutOrder     = i
+    tb.Parent          = tabBar
+    do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,3); c.Parent = tb end
+    tabBtns[i] = tb
+end
+
+local currentTab = 1
+local function switchTab(idx)
+    currentTab = idx
+    for i = 1, #TABS do
+        pages[i].Visible   = i == idx
+        tabBtns[i].BackgroundColor3 = i == idx
+            and Color3.fromRGB(88, 52, 165)
+            or  Color3.fromRGB(26, 18, 42)
+        tabBtns[i].TextColor3 = i == idx
+            and Color3.fromRGB(230, 215, 255)
+            or  Color3.fromRGB(120, 110, 155)
+    end
+end
+for i, b in ipairs(tabBtns) do
+    b.MouseButton1Click:Connect(function() switchTab(i) end)
+end
+
+-- Minimize
+local minimized = false
+minBtn.MouseButton1Click:Connect(function()
+    minimized         = not minimized
+    tabBar.Visible    = not minimized
+    contentHolder.Visible = not minimized
+    mf.Size           = minimized and UDim2.new(0, PW, 0, 26) or UDim2.new(0, PW, 0, 320)
+    minBtn.Text       = minimized and "+" or "−"
+end)
+
+-- ══════════════════════════════════════════════
+--  TAB 1: FARM
+-- ══════════════════════════════════════════════
+local fp = pages[1]
+mkToggle(fp, "Auto Farm",   "FarmEnabled")
+mkToggle(fp, "Auto Tween",  "TweenEnabled")
+mkSep(fp, "Fruit")
+mkDropdown(fp, FRUIT_NAMES, "SelectedFruit")
+mkSep(fp, "Tween Target")
+mkDropdown(fp, {"Box","Bush","Both"}, "TweenTarget")
+mkSep(fp, "Ranges")
+mkInput(fp, "Plant Range",   "PlantRange",   1,   500)
+mkInput(fp, "Harvest Range", "HarvestRange", 1,   500)
+mkInput(fp, "Tween Range",   "TweenRange",   10, 2000)
+mkSep(fp, "Stop Limit")
+do
+    local row = Instance.new("Frame")
+    row.Size                = UDim2.new(1, 0, 0, BH)
+    row.BackgroundTransparency = 1
+    row.Parent              = fp
+    local hl = Instance.new("UIListLayout")
+    hl.FillDirection        = Enum.FillDirection.Horizontal
+    hl.VerticalAlignment    = Enum.VerticalAlignment.Center
+    hl.Parent               = row
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size                = UDim2.new(0.6, 0, 1, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text                = "Stop Limit (0=off)"
+    lbl.TextColor3          = Color3.fromRGB(175, 168, 200)
+    lbl.Font                = Enum.Font.Gotham
+    lbl.TextSize            = FS - 1
+    lbl.TextXAlignment      = Enum.TextXAlignment.Left
+    lbl.Parent              = row
+
+    local tb2 = Instance.new("TextBox")
+    tb2.Size                = UDim2.new(0.38, 0, 0, BH - 7)
+    tb2.BackgroundColor3    = Color3.fromRGB(38, 28, 60)
+    tb2.TextColor3          = Color3.fromRGB(220, 212, 245)
+    tb2.Font                = Enum.Font.Gotham
+    tb2.TextSize            = FS
+    tb2.Text                = "0"
+    tb2.BorderSizePixel     = 0
+    tb2.Parent              = row
+    do local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,4); c.Parent = tb2 end
+    tb2.FocusLost:Connect(function()
+        local str = tb2.Text:lower():gsub(",", "")
+        local v   = tonumber(str:match("[%d%.]+")) or 0
+        if str:find("k") then v = v * 1000
+        elseif str:find("m") then v = v * 1e6 end
+        S.StopLimit = math.floor(v)
+        tb2.Text    = v > 0 and tostring(math.floor(v)) or "0"
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  TAB 2: PLACE
+-- ══════════════════════════════════════════════
+local pp = pages[2]
+mkToggle(pp, "Auto Place Box",   "PlaceEnabled")
+mkToggle(pp, "Grid Visualizer",  "GridViz")
+mkSep(pp, "Shape")
+mkDropdown(pp, {"Circle","Square"}, "GridShape")
+mkSep(pp, "Settings")
+mkInput(pp, "Place Radius",   "PlaceRadius",   5,   500)
+mkInput(pp, "Visual Radius",  "VisualRadius",  10,  500)
+mkInput(pp, "Cooldown (s)",   "PlaceCooldown", 0.05, 10)
+mkInput(pp, "Raycast Height", "RaycastHeight", 50, 2000)
+mkSep(pp)
+mkBtn(pp, "🔄 Reset Grid Origin", function()
+    gridReady = false
+    for k in pairs(gridSet)      do gridSet[k]      = nil end
+    for k in pairs(gridCooldown) do gridCooldown[k] = nil end
+end)
+mkBtn(pp, "📦 Refresh Box Cache", function()
+    refreshBoxes()
+    if gridReady then refreshGridSet() end
+end)
+
+-- ══════════════════════════════════════════════
+--  TAB 3: COIN
+-- ══════════════════════════════════════════════
+local cp = pages[3]
+mkToggle(cp, "Auto Coin Press", "CoinEnabled")
+mkSep(cp)
+do
+    local confirmState = false
+    local confirmTimer = nil
+    local db = mkBtn(cp, "🗑️ Delete Items", function() end)
+    local sl = Instance.new("TextLabel")
+    sl.Size               = UDim2.new(1, 0, 0, BH - 8)
+    sl.BackgroundTransparency = 1
+    sl.Text               = ""
+    sl.TextColor3         = Color3.fromRGB(220, 100, 50)
+    sl.Font               = Enum.Font.Gotham
+    sl.TextSize           = FS - 1
+    sl.Parent             = cp
+
+    db.MouseButton1Click:Connect(function()
+        if not confirmState then
+            confirmState       = true
+            db.Text            = "⚠️ Tap again to confirm"
+            db.BackgroundColor3 = Color3.fromRGB(150, 65, 0)
+            sl.Text            = "⚠️ This cannot be undone!"
+            if confirmTimer then task.cancel(confirmTimer) end
+            confirmTimer = task.delay(3, function()
+                if not confirmState then return end
+                confirmState       = false
+                db.Text            = "🗑️ Delete Items"
+                db.BackgroundColor3 = Color3.fromRGB(52, 38, 82)
+                sl.Text            = ""
+            end)
+        else
+            if confirmTimer then task.cancel(confirmTimer) end
+            confirmState = false
+            local items  = workspace:FindFirstChild("Items")
+            if items then items:Destroy() end
+            db.Text            = "✅ Items Deleted"
+            db.BackgroundColor3 = Color3.fromRGB(100, 10, 10)
+            db.Active          = false
+            db.AutoButtonColor = false
+            sl.Text            = ""
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  TAB 4: MISC / SETTINGS
+-- ══════════════════════════════════════════════
+local mp = pages[4]
+mkToggle(mp, "Auto Hunger", "AutoHunger")
+mkSep(mp, "Hunger Fruit")
+mkDropdown(mp, FRUIT_NAMES, "HungerFruit")
+mkSep(mp)
+mkBtn(mp, "🔧 Re-apply Performance", function()
+    task.spawn(applyPerf)
+end)
+mkBtn(mp, "📦 Refresh Plant Boxes", function()
+    refreshBoxes()
+end)
+mkBtn(mp, "🗺️ Re-init Grid Origin", function()
+    gridReady = false
+    for k in pairs(gridSet)      do gridSet[k]      = nil end
+    for k in pairs(gridCooldown) do gridCooldown[k] = nil end
+end)
+mkSep(mp)
+local cr = Instance.new("TextLabel")
+cr.Size               = UDim2.new(1, 0, 0, BH - 6)
+cr.BackgroundTransparency = 1
+cr.Text               = "⚡ FeeFaaHub — All Rights Reserved"
+cr.TextColor3         = Color3.fromRGB(68, 50, 100)
+cr.Font               = Enum.Font.GothamItalic
+cr.TextSize           = FS - 2
+cr.Parent             = mp
+
+-- ══════════════════════════════════════════════
+--  MOBILE DRAG (title bar touch)
+-- ══════════════════════════════════════════════
+if isMobile then
+    local dragging  = false
+    local dragStart = nil
+    local startPos  = nil
+
+    titleBar.InputBegan:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch then
+            dragging  = true
+            dragStart = inp.Position
+            startPos  = mf.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(inp)
+        if dragging and inp.UserInputType == Enum.UserInputType.Touch then
+            local delta = inp.Position - dragStart
+            mf.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(inp)
+        if inp.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════
+--  INIT
+-- ══════════════════════════════════════════════
+switchTab(1)
+print("⚡ FeeFaaHub — Loaded successfully!")
